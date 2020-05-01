@@ -3,18 +3,23 @@ from typing import Optional
 
 import qgrid 
 import pandas as pd
-from IPython.display import display
+from IPython.display import display,HTML
 import numpy as np
-from ipywidgets import widgets
+from ipywidgets import widgets, Button, HBox, VBox
 from matplotlib import pyplot as plt
 from matplotlib import gridspec
 
+from ipywidgets import Button, HBox, VBox
+
 class ExamData:
-    def __init__(self, filename: str, import_from: Optional[str] = None):
+    def __init__(self, filename: str, export_to:str, import_from: Optional[str] = None):
         if not filename.endswith(".xlsx"):
             raise RuntimeError("File '{filename}' does not end with '.xlsx'!")
+        if not export_to.endswith(".xlsx"):
+            raise RuntimeError("File '{export_to}' does not end with '.xlsx'!")
 
         self.path = Path(filename)
+        self.path_export = Path(export_to)
         self.path_import = Path(import_from) if import_from else None
         self.ignore_cell_edited = False
         #     filename = filename[:-1]
@@ -118,22 +123,72 @@ class ExamData:
 
         self.output_text = widgets.Output(layout={'border': '1px solid black'})
         self.output_plot_score = widgets.Output()
-        self.output_plot_points = widgets.Output()
+        self.output_info = widgets.Output()
 
+        self.button_undo = Button(description='Undo')
+        self.button_redo = Button(description='Redo')
+        self.button_export = Button(description='Export')
+        self.button_export.on_click(self.export)
+        self.button_undo.on_click(self.undo)
+        self.button_redo.on_click(self.redo)
+        self.button_bar = HBox([self.button_undo, self.button_redo, self.button_export])
+
+        self._undo = []
+        self._redo = []
 
         self.load(must_exist=False)
+        
+
+    def export(self, btn):
+        self.save(export=True)
+
+    def _set_current_state(self):
+        self._current_state = {
+            'tasks': self.tasks_df,
+            'marks': self.marks_df,
+            'students': self.students_df
+        }
+
+    def _restore_state(self, state):
+        self.tasks_df = state['tasks'] 
+        self.marks_df = state['marks'] 
+        self.students_df = state['students'] 
+        self.recalculate_totals()
+
+    def _add_to_history(self):
+        self._undo.append(self._current_state)
+        self._redo = []
+        self._set_current_state()
+
+    def undo(self, *arg):
+        if not self._undo:
+            return
+        self._set_current_state()
+        self._redo.append(self._current_state)
+        self._restore_state(self._undo.pop())
+        self._set_current_state()
+
+    def redo(self, *arg):
+        if not self._redo:
+            return
+        self._set_current_state()
+        self._undo.append(self._current_state)
+        self._restore_state(self._redo.pop())
+        self._set_current_state()
 
 
     def _update_df(self, grid, new_df):
-        if len(new_df) != len(grid.df) or list(grid.df.columns.values) != list(new_df.columns.values):
+        grid_current = grid.get_changed_df()
+        if len(new_df) != len(grid_current) or list(new_df.columns.values) != list(grid_current.columns.values):
             grid.df = new_df
+            # print('complete update')
             return
         self.ignore_cell_edited = True
-        grid_current = grid.get_changed_df()
         for col in new_df.columns.values:
             for row in range(len(new_df)):
                 if grid_current.loc[row, col] != new_df.loc[row, col]:
                     grid.edit_cell(row, col, new_df.loc[row, col])
+                    # print(f'update: {row}, {col}')
         self.ignore_cell_edited = False
 
     @property
@@ -161,28 +216,27 @@ class ExamData:
     def students_df(self, value):
         self._update_df(self.grid_students, value)
 
-
-    @property
-    def path_backup(self):
-        return self.path.with_name(self.path.name[:-5]+'-backup.xlsx')
-
-    def save(self):
+    def save(self, export=False):
+        path = self.path_export if export else self.path
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            if self.path_backup.exists() and self.path.exists():
-                self.path_backup.unlink()
-            if self.path.exists():
-                self.path.rename(self.path_backup)            
+            path_backup = path.with_name(path.name[:-5]+'-backup.xlsx')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path_backup.exists() and path.exists():
+                path_backup.unlink()
+            if path.exists():
+                path.rename(path_backup)            
             
-            with pd.ExcelWriter(str(self.path)) as writer:
+            with pd.ExcelWriter(str(path)) as writer:
                 self.students_df.to_excel(writer, index=False, sheet_name='Students')
                 self.tasks_df.to_excel(writer, index=False, sheet_name='Tasks')
                 self.marks_df.to_excel(writer, index=False, sheet_name='Marks')
+                if export:
+                    self.grid_points.df.to_excel(writer, index=True, sheet_name='Points')
+                    self.grid_score.df.to_excel(writer, index=True, sheet_name='Score')
         except Exception as ex:
             self.output_text.append_stderr(str(ex)+'\n')
         
     def load(self, must_exist=True):
-
         load_path = self.path
         if not load_path.exists() and self.path_import is not None:
             load_path = self.path_import
@@ -190,9 +244,10 @@ class ExamData:
             self.students_df = pd.read_excel(str(load_path), sheet_name='Students')
             self.tasks_df = pd.read_excel(str(load_path), sheet_name='Tasks')
             self.marks_df = pd.read_excel(str(load_path), sheet_name='Marks')
-            self.recalculate_totals()
+            self.recalculate_totals()    
         except Exception as ex:
             self.output_text.append_stderr(str(ex)+'\n')
+        
 
     def new_taskname(self,old,new_index):
         students_df = self.students_df
@@ -213,7 +268,7 @@ class ExamData:
         tasks_df.loc[new_index,'Task'] = new
         self.students_df = students_df
         if changed:
-            self.tasks_df = tasks_df
+            self.grid_tasks.df = tasks_df
 
     def recalculate_totals(self):
         students_df = self.students_df
@@ -245,6 +300,7 @@ class ExamData:
 
         self.students_df = students_df
         self.marks_df = marks_df
+        self._set_current_state()
         self.save()
         self.recalculate_output()
 
@@ -293,17 +349,28 @@ class ExamData:
             plt.vlines(xlines, 0, np.max(plot_points['Amount']*0.75), linestyles='dotted')
             plt.show()
 
+        with self.output_info:
+            self.output_info.clear_output(True)
+            print('Information')
+            print('-----------\n')
+            df = self.grid_score.df
+            mean = np.sum(df.index.astype(int) * df['Amount'])/np.sum(df['Amount'])
+            print(f'Ø {mean}')
+            print(f'#students: {len(self.students_df)}')
+
     def tasks_changed(self, *arg, **kwarg):
         evt = arg[0]
         if self.ignore_cell_edited and evt['name'] == 'cell_edited':
             return
+        self._add_to_history()
         if evt['name'] == 'row_added':
             self.new_taskname(None, evt['index'])
         if evt['name'] == 'cell_edited' and evt['column'] == 'Task':
             self.new_taskname(evt['old'], evt['index'])
         if evt['name'] == 'row_removed':
             students_df = self.students_df
-            indices =  self.tasks_df.loc[evt['indices'], 'Task'].values
+            cols = self.students_df.columns.values[3:]
+            indices = [cols[i] for i in evt["indices"]]
             students_df.drop(indices, axis=1, inplace=True)
             self.students_df = students_df
         self.recalculate_totals()
@@ -312,11 +379,13 @@ class ExamData:
     def marks_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]['name'] == 'cell_edited':
             return
+        self._add_to_history()
         self.recalculate_marks()
 
     def students_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]['name'] == 'cell_edited':
             return
+        self._add_to_history()
         self.recalculate_totals()
 
     def print_event(self, *arg, **kwarg):
@@ -339,21 +408,41 @@ class ExamData:
     def show_marks(self):        
         display(self.grid_marks)
 
+    def init(self):
+        display(HTML("""
+        <style>
+        .slick-header-column {
+            background-color: rgb(255, 214, 90) !important;
+        }
+        .slick-resizable-handle {
+            border-left-color: rgb(255, 214, 90) !important;
+            border-right-color: rgb(255, 214, 90) !important;
+            background-color: rgb(141, 119, 50) !important;
+        }
+        </style>
+        """))
+
+    def show_buttons(self):
+        display(self.button_bar)
+
     def show_input(self):
         self.show_output_text()
+        self.show_buttons()
         self.show_students()
         self.show_tasks()
         self.show_marks()
         
     def show_all(self):
+        self.init()
         self.show_input()
         self.show_output()
 
     def show_output(self):
+        display(self.output_info)
+        display(self.output_plot_score)
         display(self.grid_score)
         display(self.grid_points)
-        display(self.output_plot_score)
-        display(self.output_plot_points)
+        
         
 
 import re
