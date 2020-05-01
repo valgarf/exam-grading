@@ -10,7 +10,8 @@ setup(name='exam-grading',
       url='https://github.com/valgarf/exam-grading',
       packages=['exam_grading'],
       python_requires='>=3.8',
-      install_requires= ['wheel', 'jupyter', 'qgrid', 'pandas', 'jupyter_contrib_nbextensions', 'ipysheet', 'openpyxl', 'xlrd'],
+      install_requires= ['wheel', 'jupyter', 'qgrid', 'pandas', 'jupyter_contrib_nbextensions', 
+                        'ipysheet', 'openpyxl', 'xlrd', 'matplotlib'],
      )
 
 # also run:

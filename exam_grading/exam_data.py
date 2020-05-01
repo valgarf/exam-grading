@@ -6,6 +6,8 @@ import pandas as pd
 from IPython.display import display
 import numpy as np
 from ipywidgets import widgets
+from matplotlib import pyplot as plt
+from matplotlib import gridspec
 
 class ExamData:
     def __init__(self, filename: str, import_from: Optional[str] = None):
@@ -80,7 +82,7 @@ class ExamData:
         self.grid_students.on(events, self.students_changed)
 
         self.grid_marks = qgrid.show_grid(
-            pd.DataFrame(data={'Mark':['1','2','3','4','5','6'],'Min Percentage':[85,70,55,40,20,0], 'Points': [8.5,7,5.5,4,2,0]}), 
+            pd.DataFrame(data={'Mark':['1','2','3','4','5','6'],'Min Percentage':[85,70,55,40,20,0], 'Min Points': [8.5,7,5.5,4,2,0], 'Min Points': [10,8,6.5,5,3.5,1.5]}), 
             show_toolbar=True,
             grid_options = dict(maxVisibleRows = 30,
                                 minVisibleRows = 2,
@@ -90,7 +92,34 @@ class ExamData:
                                 enableColumnReorder=False )) 
         self.grid_marks.on(events, self.marks_changed)
 
-        self.output = widgets.Output(layout={'border': '1px solid black'})
+        self.grid_score = qgrid.show_grid(
+            pd.DataFrame(data={'Mark':[],'Amount':[], 'Students': []}), 
+            show_toolbar=False,
+            grid_options = dict(maxVisibleRows = 30,
+                                minVisibleRows = 2,
+                                sortable=False,
+                                filterable=False,
+                                autoEdit=False,
+                                editable=False,
+                                enableColumnReorder=False,
+                                )) 
+
+        self.grid_points = qgrid.show_grid(
+            pd.DataFrame(data={'Points':[], 'Mark': [], 'Amount':[], 'Students': []}), 
+            show_toolbar=False,
+            grid_options = dict(maxVisibleRows = 30,
+                                minVisibleRows = 2,
+                                sortable=False,
+                                filterable=False,
+                                autoEdit=False,
+                                editable=False,
+                                enableColumnReorder=False,
+                                )) 
+
+        self.output_text = widgets.Output(layout={'border': '1px solid black'})
+        self.output_plot_score = widgets.Output()
+        self.output_plot_points = widgets.Output()
+
 
         self.load(must_exist=False)
 
@@ -121,7 +150,7 @@ class ExamData:
 
     @marks_df.setter
     def marks_df(self, value):
-        value = value.astype({'Mark': 'str', 'Min Percentage': 'float', 'Points': 'float'})
+        value = value.astype({'Mark': 'str', 'Min Percentage': 'float', 'Min Points': 'float', 'Max Points': 'float'})
         self._update_df(self.grid_marks, value)
 
     @property
@@ -143,15 +172,14 @@ class ExamData:
             if self.path_backup.exists() and self.path.exists():
                 self.path_backup.unlink()
             if self.path.exists():
-                self.path.rename(self.path_backup)
-            
+                self.path.rename(self.path_backup)            
             
             with pd.ExcelWriter(str(self.path)) as writer:
                 self.students_df.to_excel(writer, index=False, sheet_name='Students')
                 self.tasks_df.to_excel(writer, index=False, sheet_name='Tasks')
                 self.marks_df.to_excel(writer, index=False, sheet_name='Marks')
         except Exception as ex:
-            self.output.append_stderr(str(ex)+'\n')
+            self.output_text.append_stderr(str(ex)+'\n')
         
     def load(self, must_exist=True):
 
@@ -162,8 +190,9 @@ class ExamData:
             self.students_df = pd.read_excel(str(load_path), sheet_name='Students')
             self.tasks_df = pd.read_excel(str(load_path), sheet_name='Tasks')
             self.marks_df = pd.read_excel(str(load_path), sheet_name='Marks')
+            self.recalculate_totals()
         except Exception as ex:
-            self.output.append_stderr(str(ex)+'\n')
+            self.output_text.append_stderr(str(ex)+'\n')
 
     def new_taskname(self,old,new_index):
         students_df = self.students_df
@@ -205,17 +234,64 @@ class ExamData:
         # update min points (round to half points)
         total_points = np.sum(tasks_df['Points'])
         mark_points = np.round(marks_df['Min Percentage'] / 100 * total_points * 2)/2
-        marks_df['Points'] = mark_points
+        marks_df['Min Points'] = mark_points
+        marks_df['Max Points'] = np.array([total_points,] + list(mark_points - 0.5)[:-1])
 
         # calculate student marks
         totals = students_df.loc[:,tasks_df['Task'].values].sum(axis=1)
-        for row in marks_df.sort_values('Points', ascending = True).itertuples():
+        for row in marks_df.sort_values('Min Points', ascending = True).rename(columns={'Min Points': 'Points'}).itertuples():
             mask_students = totals>=row.Points
             students_df.loc[mask_students,'Mark'] = row.Mark
 
         self.students_df = students_df
         self.marks_df = marks_df
         self.save()
+        self.recalculate_output()
+
+    def recalculate_output(self):
+        students_df = self.students_df.copy()
+        students_df['Points'] = students_df.loc[:,self.tasks_df['Task'].values].sum(axis=1)
+        students_df['Amount'] = 1
+        students_df['Students'] = students_df['Student']
+
+        def agg_names(seq):
+            return ", ".join(seq.values)
+
+        self.grid_points.df = (students_df
+                                .groupby('Points')
+                                .agg({'Mark': 'first', 'Amount': 'sum', 'Students': agg_names}))
+        self.grid_score.df = (students_df
+                                .groupby('Mark')
+                                .agg({'Amount': 'sum', 'Students': agg_names}))
+
+        # plot_points= self.grid_points.df.reset_index()[['Points','Amount']]
+        total_points = np.sum(self.tasks_df['Points'])
+        points = np.arange(0, total_points+0.1,step=0.5)
+        plot_points = pd.DataFrame(index=points, data=dict(Amount=0))
+        truncated_points = students_df.copy()
+        truncated_points.loc[truncated_points['Points'] > total_points,'Points'] = total_points
+        truncated_points = (truncated_points
+                                .groupby('Points')
+                                .agg({'Mark': 'first', 'Amount': 'sum', 'Students': agg_names}))
+        plot_points['Amount'] = truncated_points['Amount']
+
+        plot_score = pd.DataFrame(index=self.marks_df['Mark'].values, data=dict(Amount=0))
+        plot_score['Amount'] = self.grid_score.df['Amount']
+        
+        with self.output_plot_score:
+            self.output_plot_score.clear_output(True)
+            fig = plt.figure(figsize=(17, 5)) 
+            gs = gridspec.GridSpec(1, 2, width_ratios=[3, 4]) 
+            ax1 = plt.subplot(gs[0])
+            ax2 = plt.subplot(gs[1])
+            plot_score.plot.bar(y='Amount', color='#28d9ed', ax=ax1)
+            plot_points.plot.bar(y='Amount', color='#28d9ed', ax=ax2)
+            xticks_pos = (self.marks_df['Min Points'].values + self.marks_df['Max Points'].values)
+            xticks_labels = self.marks_df['Mark'].values
+            plt.xticks(list(xticks_pos),list(xticks_labels))
+            xlines = list((self.marks_df['Min Points'].values-0.25)*2)[:-1]
+            plt.vlines(xlines, 0, np.max(plot_points['Amount']*0.75), linestyles='dotted')
+            plt.show()
 
     def tasks_changed(self, *arg, **kwarg):
         evt = arg[0]
@@ -231,10 +307,7 @@ class ExamData:
             students_df.drop(indices, axis=1, inplace=True)
             self.students_df = students_df
         self.recalculate_totals()
-        # df = self.grid_students.get_changed_df()
-        # print(df.columns)
-        # print(self.grid_tasks.get_changed_df()['Task'].values)
-        # df.columns = df.columns[:2] + self.grid_tasks.get_changed_df()['Task'].values
+
 
     def marks_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]['name'] == 'cell_edited':
@@ -254,8 +327,8 @@ class ExamData:
         if kwarg:
             print(f'kwarg: {kwarag}')
 
-    def show_output(self):
-        display(self.output)
+    def show_output_text(self):
+        display(self.output_text)
 
     def show_students(self):
         display(self.grid_students)
@@ -267,12 +340,20 @@ class ExamData:
         display(self.grid_marks)
 
     def show_input(self):
-        self.show_output()
+        self.show_output_text()
         self.show_students()
         self.show_tasks()
         self.show_marks()
         
     def show_all(self):
         self.show_input()
+        self.show_output()
+
+    def show_output(self):
+        display(self.grid_score)
+        display(self.grid_points)
+        display(self.output_plot_score)
+        display(self.output_plot_points)
+        
 
 import re
