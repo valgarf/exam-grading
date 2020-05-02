@@ -8,11 +8,12 @@ import numpy as np
 from ipywidgets import widgets, Button, HBox, VBox
 from matplotlib import pyplot as plt
 from matplotlib import gridspec
+from xlrd import XLRDError
 
 from ipywidgets import Button, HBox, VBox
 
 class ExamData:
-    def __init__(self, filename: str, export_to:str, import_from: Optional[str] = None):
+    def __init__(self, filename: str, export_to:str, import_from: Optional[str] = None, grade_postfixes = {'+':-0.3, '-':0.3}):
         if not filename.endswith(".xlsx"):
             raise RuntimeError("File '{filename}' does not end with '.xlsx'!")
         if not export_to.endswith(".xlsx"):
@@ -22,32 +23,16 @@ class ExamData:
         self.path_export = Path(export_to)
         self.path_import = Path(import_from) if import_from else None
         self.ignore_cell_edited = False
-        #     filename = filename[:-1]
-        # self.path_students = Path(filename+'_students.csv')
-        # self.path_marks = Path(filename+'_marks.csv')
-        # if not self.path_students.exists:
-        #     self.path_students.parent.mkdir(parents=True, exist_ok=True)
-        #     with open(self.path_students, "w") as fout:
-        #         fout.write("name;total;student A; 0")
-        # if not self.path_marks.exists:
-        #     self.path_marks.parent.mkdir(parents=True, exist_ok=True)
-        #     with open(self.path_marks, "w") as fout:
-        #         fout.write("name;total;student A; 0")
-
-        # self.df = pd.f
-
+        self.grade_postfixes = grade_postfixes
+        self._disable_update=False
+        self._undo = []
+        self._redo = []
+        self._students_fixed_cols=4
+        
         events = [
-            #'instance_created',
             'cell_edited',
-            #'selection_changed',
-            #'viewport_changed',
             'row_added',
             'row_removed',
-            #'filter_dropdown_shown',
-            #'filter_changed',
-            #'sort_changed',
-            #'text_filter_viewport_changed',
-            #'json_updated'
         ]
         all_events = [
             'instance_created',
@@ -73,9 +58,10 @@ class ExamData:
                                 autoEdit=True,
                                 enableColumnReorder=False)) 
         self.grid_tasks.on(events, self.tasks_changed)
+        self.grid_tasks.on(['selection_changed','row_removed'],self.select_last_row)
 
         self.grid_students = qgrid.show_grid(
-            pd.DataFrame(data={'Student':['Student A'],'Mark':['4'],'Total':['5 (50%)'],'Task 1':[5]}), 
+            pd.DataFrame(data={'Student':['Student A'],'Grade':['4'],'Grade Correction': [0],'Total':['5 (50%)'],'Task 1':[5]}), 
             show_toolbar=True,
             grid_options = dict(maxVisibleRows = 30,
                                 minVisibleRows = 2,
@@ -85,9 +71,10 @@ class ExamData:
                                 enableColumnReorder=False,
                                 column_definitions={'Total': dict(editable= False)} )) 
         self.grid_students.on(events, self.students_changed)
+        self.grid_students.on(['selection_changed','row_removed'],self.select_last_row)
 
         self.grid_marks = qgrid.show_grid(
-            pd.DataFrame(data={'Mark':['1','2','3','4','5','6'],'Min Percentage':[85,70,55,40,20,0], 'Min Points': [8.5,7,5.5,4,2,0], 'Min Points': [10,8,6.5,5,3.5,1.5]}), 
+            pd.DataFrame(data={'Grade':['1','2','3','4','5','6'],'Min Percentage':[85,70,55,40,20,0], 'Min Points': [8.5,7,5.5,4,2,0], 'Min Points': [10,8,6.5,5,3.5,1.5]}), 
             show_toolbar=True,
             grid_options = dict(maxVisibleRows = 30,
                                 minVisibleRows = 2,
@@ -96,9 +83,11 @@ class ExamData:
                                 autoEdit=True,
                                 enableColumnReorder=False )) 
         self.grid_marks.on(events, self.marks_changed)
+        self.grid_marks.on(['selection_changed','row_removed'],self.select_last_row)
+        
 
         self.grid_score = qgrid.show_grid(
-            pd.DataFrame(data={'Mark':[],'Amount':[], 'Students': []}), 
+            pd.DataFrame(data={'Grade':[],'Amount':[], 'Students': []}), 
             show_toolbar=False,
             grid_options = dict(maxVisibleRows = 30,
                                 minVisibleRows = 2,
@@ -110,7 +99,7 @@ class ExamData:
                                 )) 
 
         self.grid_points = qgrid.show_grid(
-            pd.DataFrame(data={'Points':[], 'Mark': [], 'Amount':[], 'Students': []}), 
+            pd.DataFrame(data={'Points':[], 'Grade': [], 'Amount':[], 'Students': []}), 
             show_toolbar=False,
             grid_options = dict(maxVisibleRows = 30,
                                 minVisibleRows = 2,
@@ -128,13 +117,21 @@ class ExamData:
         self.button_undo = Button(description='Undo')
         self.button_redo = Button(description='Redo')
         self.button_export = Button(description='Export')
+        self.button_update = Button(description='Updating enabled', button_style='success', tooltip="Toggles the automatic recalculation when editing cells in the table. These auto updates might be annoying when trying to edit multiple data fields.")
+        self.button_postfix = widgets.ToggleButton(
+                value=False,
+                description='Aggregate Postfix',
+                disabled=False,
+                button_style='info', # 'success', 'info', 'warning', 'danger' or ''
+                tooltip="Wether or not the grade overview and plot will aggregate grades with different postfixes into one grade. E.g. the marks '2-','2','2+' will all be shown as '2'.",
+                icon='times' # (FontAwesome names without the `fa-` prefix)
+            )
         self.button_export.on_click(self.export)
         self.button_undo.on_click(self.undo)
         self.button_redo.on_click(self.redo)
-        self.button_bar = HBox([self.button_undo, self.button_redo, self.button_export])
-
-        self._undo = []
-        self._redo = []
+        self.button_update.on_click(self.switch_disable_update)
+        self.button_postfix.observe(self.switch_aggregate_postfix)
+        self.button_bar = HBox([self.button_undo, self.button_redo, self.button_export, self.button_update,self.button_postfix])
 
         self.load(must_exist=False)
         
@@ -176,20 +173,41 @@ class ExamData:
         self._restore_state(self._redo.pop())
         self._set_current_state()
 
+    def switch_disable_update(self, *arg):
+        self._disable_update =  not self._disable_update
+        if self._disable_update:
+            self.button_update.button_style='warning'
+            self.button_update.description='Updating disabled'
+        else:
+            self.button_update.button_style='success'
+            self.button_update.description='Updating enabled'
+            self.recalculate_totals()
+
+    def switch_aggregate_postfix(self, *arg):
+        if not arg[0]['name'] == 'value':
+            return
+        if self.button_postfix.value:
+            self.button_postfix.icon = 'check'
+        else:
+            self.button_postfix.icon = 'times'
+        self.recalculate_output()
 
     def _update_df(self, grid, new_df):
-        grid_current = grid.get_changed_df()
-        if len(new_df) != len(grid_current) or list(new_df.columns.values) != list(grid_current.columns.values):
-            grid.df = new_df
-            # print('complete update')
-            return
-        self.ignore_cell_edited = True
-        for col in new_df.columns.values:
-            for row in range(len(new_df)):
-                if grid_current.loc[row, col] != new_df.loc[row, col]:
-                    grid.edit_cell(row, col, new_df.loc[row, col])
-                    # print(f'update: {row}, {col}')
-        self.ignore_cell_edited = False
+        grid.df = new_df
+        return
+
+        # grid_current = grid.get_changed_df()
+        # if list(new_df.index.values) != list(grid_current.index.values) or list(new_df.columns.values) != list(grid_current.columns.values):
+        #     grid.df = new_df
+        #     # print('complete update')
+        #     return
+        # self.ignore_cell_edited = True
+        # for col in new_df.columns.values:
+        #     for row in range(len(new_df)):
+        #         if grid_current.loc[row, col] != new_df.loc[row, col]:
+        #             grid.edit_cell(row, col, new_df.loc[row, col])
+        #             # print(f'update: {row}, {col}')
+        # self.ignore_cell_edited = False
 
     @property
     def tasks_df(self):
@@ -205,7 +223,7 @@ class ExamData:
 
     @marks_df.setter
     def marks_df(self, value):
-        value = value.astype({'Mark': 'str', 'Min Percentage': 'float', 'Min Points': 'float', 'Max Points': 'float'})
+        value = value.astype({'Grade': 'str', 'Min Percentage': 'float', 'Min Points': 'float', 'Max Points': 'float'})
         self._update_df(self.grid_marks, value)
 
     @property
@@ -229,7 +247,7 @@ class ExamData:
             with pd.ExcelWriter(str(path)) as writer:
                 self.students_df.to_excel(writer, index=False, sheet_name='Students')
                 self.tasks_df.to_excel(writer, index=False, sheet_name='Tasks')
-                self.marks_df.to_excel(writer, index=False, sheet_name='Marks')
+                self.marks_df.to_excel(writer, index=False, sheet_name='Grades')
                 if export:
                     self.grid_points.df.to_excel(writer, index=True, sheet_name='Points')
                     self.grid_score.df.to_excel(writer, index=True, sheet_name='Score')
@@ -241,12 +259,22 @@ class ExamData:
         if not load_path.exists() and self.path_import is not None:
             load_path = self.path_import
         try:
-            self.students_df = pd.read_excel(str(load_path), sheet_name='Students')
-            self.tasks_df = pd.read_excel(str(load_path), sheet_name='Tasks')
-            self.marks_df = pd.read_excel(str(load_path), sheet_name='Marks')
+            students_df = pd.read_excel(str(load_path), sheet_name='Students')
+            tasks_df = pd.read_excel(str(load_path), sheet_name='Tasks')
+            try:
+                marks_df = pd.read_excel(str(load_path), sheet_name='Grades')
+            except XLRDError:
+                marks_df = pd.read_excel(str(load_path), sheet_name='Marks')
+                students_df = students_df.rename(columns={'Mark':'Grade'})
+                marks_df = marks_df.rename(columns={'Mark':'Grade'})
+                students_df.insert(2,'Adjustment',0)
+            self.students_df = students_df
+            self.marks_df = marks_df
+            self.tasks_df = tasks_df
             self.recalculate_totals()    
         except Exception as ex:
             self.output_text.append_stderr(str(ex)+'\n')
+            raise
         
 
     def new_taskname(self,old,new_index):
@@ -271,6 +299,10 @@ class ExamData:
             self.grid_tasks.df = tasks_df
 
     def recalculate_totals(self):
+        if self._disable_update:
+            self._set_current_state()
+            self.save()
+            return
         students_df = self.students_df
         tasks_df = self.tasks_df
         total_points = np.sum(tasks_df['Points'])
@@ -282,6 +314,10 @@ class ExamData:
         self.recalculate_marks()
 
     def recalculate_marks(self):
+        if self._disable_update:
+            self._set_current_state()
+            self.save()
+            return
         students_df = self.students_df
         tasks_df = self.tasks_df
         marks_df = self.marks_df
@@ -294,15 +330,51 @@ class ExamData:
 
         # calculate student marks
         totals = students_df.loc[:,tasks_df['Task'].values].sum(axis=1)
+        grade_list= [] 
         for row in marks_df.sort_values('Min Points', ascending = True).rename(columns={'Min Points': 'Points'}).itertuples():
+            grade_list.append(row.Grade)
             mask_students = totals>=row.Points
-            students_df.loc[mask_students,'Mark'] = row.Mark
+            students_df.loc[mask_students,'Grade'] = row.Grade
+
+        def adjust_grade(student):
+            if student.Adjustment != 0:
+                idx = grade_list.index(student.Grade)
+                idx += student.Adjustment
+                if idx < 0:
+                    idx = 0
+                if idx >= len(grade_list):
+                    idx = -1
+                student.Grade = grade_list[idx]
+            return student
+        students_df = students_df.apply(adjust_grade, axis=1)
 
         self.students_df = students_df
         self.marks_df = marks_df
         self._set_current_state()
         self.save()
         self.recalculate_output()
+
+    def _grade_to_float(self, grades):
+        result = []
+        for g in grades:
+            corr = 0
+            for pf, pf_corr in self.grade_postfixes.items():
+                if g.endswith(pf):
+                    g = g[:-len(pf)]
+                    corr += pf_corr
+            result.append(float(g) + corr)
+        return np.array(result)
+
+    def _strip_postfix(self, grades):
+        result = []
+        for g in grades:
+            corr = 0
+            for pf, pf_corr in self.grade_postfixes.items():
+                if g.endswith(pf):
+                    g = g[:-len(pf)]
+                    corr += pf_corr
+            result.append(g)
+        return np.array(result)
 
     def recalculate_output(self):
         students_df = self.students_df.copy()
@@ -315,9 +387,13 @@ class ExamData:
 
         self.grid_points.df = (students_df
                                 .groupby('Points')
-                                .agg({'Mark': 'first', 'Amount': 'sum', 'Students': agg_names}))
-        self.grid_score.df = (students_df
-                                .groupby('Mark')
+                                .agg({'Grade': 'first', 'Amount': 'sum', 'Students': agg_names}))
+        score_base_df = students_df
+        if self.button_postfix.value:
+            score_base_df = students_df.copy()
+            score_base_df['Grade'] = self._strip_postfix(score_base_df['Grade'])
+        self.grid_score.df = (score_base_df
+                                .groupby('Grade')
                                 .agg({'Amount': 'sum', 'Students': agg_names}))
 
         # plot_points= self.grid_points.df.reset_index()[['Points','Amount']]
@@ -328,10 +404,13 @@ class ExamData:
         truncated_points.loc[truncated_points['Points'] > total_points,'Points'] = total_points
         truncated_points = (truncated_points
                                 .groupby('Points')
-                                .agg({'Mark': 'first', 'Amount': 'sum', 'Students': agg_names}))
+                                .agg({'Grade': 'first', 'Amount': 'sum', 'Students': agg_names}))
         plot_points['Amount'] = truncated_points['Amount']
 
-        plot_score = pd.DataFrame(index=self.marks_df['Mark'].values, data=dict(Amount=0))
+        grade_list = self.marks_df['Grade'].values
+        if self.button_postfix.value:
+            grade_list = np.unique(self._strip_postfix(grade_list))
+        plot_score = pd.DataFrame(index=grade_list, data=dict(Amount=0))
         plot_score['Amount'] = self.grid_score.df['Amount']
         
         with self.output_plot_score:
@@ -343,10 +422,15 @@ class ExamData:
             plot_score.plot.bar(y='Amount', color='#28d9ed', ax=ax1)
             plot_points.plot.bar(y='Amount', color='#28d9ed', ax=ax2)
             xticks_pos = (self.marks_df['Min Points'].values + self.marks_df['Max Points'].values)
-            xticks_labels = self.marks_df['Mark'].values
+            xticks_labels = self.marks_df['Grade'].values
             plt.xticks(list(xticks_pos),list(xticks_labels))
-            xlines = list((self.marks_df['Min Points'].values-0.25)*2)[:-1]
-            plt.vlines(xlines, 0, np.max(plot_points['Amount']*0.75), linestyles='dotted')
+            marks_no_postfix = self.marks_df.copy()
+            marks_no_postfix['Grade'] = self._strip_postfix(marks_no_postfix['Grade'])
+            xlines_large = marks_no_postfix.groupby('Grade').agg({'Min Points': 'min'})['Min Points'].values[:-1]
+            xlines = self.marks_df['Min Points'].values[:-1]
+            xlines = np.array([xl for xl in xlines if xl not in xlines_large])
+            plt.vlines((xlines-0.25)*2, 0, np.max(plot_points['Amount']*0.45), linestyles='dotted')
+            plt.vlines((xlines_large-0.25)*2, 0, np.max(plot_points['Amount']*0.8), linestyles='dotted')
             plt.show()
 
         with self.output_info:
@@ -354,7 +438,7 @@ class ExamData:
             print('Information')
             print('-----------\n')
             df = self.grid_score.df
-            mean = np.sum(df.index.astype(int) * df['Amount'])/np.sum(df['Amount'])
+            mean = np.sum(self._grade_to_float(df.index.values) * df['Amount'])/np.sum(df['Amount'])
             print(f'Ø {mean}')
             print(f'#students: {len(self.students_df)}')
 
@@ -369,10 +453,11 @@ class ExamData:
             self.new_taskname(evt['old'], evt['index'])
         if evt['name'] == 'row_removed':
             students_df = self.students_df
-            cols = self.students_df.columns.values[3:]
+            cols = self.students_df.columns.values[self._students_fixed_cols:]
             indices = [cols[i] for i in evt["indices"]]
             students_df.drop(indices, axis=1, inplace=True)
             self.students_df = students_df
+            self.tasks_df = self.tasks_df.reset_index(drop=True)
         self.recalculate_totals()
 
 
@@ -388,13 +473,19 @@ class ExamData:
         self._add_to_history()
         self.recalculate_totals()
 
+    def select_last_row(self, evt, grid):
+        if not evt['name'] == 'selection_changed' or (not evt['new'] and evt['source'] == 'gui'):
+            df = grid.get_changed_df()
+            grid.change_selection(rows=[len(df)-1])
+        
     def print_event(self, *arg, **kwarg):
-        evt = arg[0]
-        print(f'evt: {evt}')
-        if len(arg) > 2:
-            print(f'arg: {arg[2:]}')
-        if kwarg:
-            print(f'kwarg: {kwarag}')
+        with self.output_text:
+            evt = arg[0]
+            print(f'evt: {evt}')
+            if len(arg) > 2:
+                print(f'arg: {arg[2:]}')
+            if kwarg:
+                print(f'kwarg: {kwarag}')
 
     def show_output_text(self):
         display(self.output_text)
