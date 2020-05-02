@@ -11,7 +11,7 @@ setup(name='exam-grading',
       packages=['exam_grading'],
       python_requires='>=3.8',
       install_requires= ['wheel', 'jupyter', 'qgrid', 'pandas', 'jupyter_contrib_nbextensions', 
-                        'ipysheet', 'openpyxl', 'xlrd', 'matplotlib'],
+                        'ipysheet', 'openpyxl', 'xlrd', 'matplotlib', 'nbopen'],
      )
 
 # also run:
@@ -22,3 +22,4 @@ setup(name='exam-grading',
 # jupyter nbextension enable --py --user qgrid
 # jupyter nbextension install --py ipysheet --user
 # jupyter nbextension enable --py --user ipysheet
+# python -m nbopen.install_win
