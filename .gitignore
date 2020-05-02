@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+*-backup.xlsx
+test_export_*.xlsx
+template.html

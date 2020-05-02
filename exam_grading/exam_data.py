@@ -73,7 +73,7 @@ class ExamData:
         self.grid_students.on(events, self.students_changed)
         self.grid_students.on(['selection_changed','row_removed'],self.select_last_row)
 
-        self.grid_marks = qgrid.show_grid(
+        self.grid_grades = qgrid.show_grid(
             pd.DataFrame(data={'Grade':['1','2','3','4','5','6'],'Min Percentage':[85,70,55,40,20,0], 'Min Points': [8.5,7,5.5,4,2,0], 'Min Points': [10,8,6.5,5,3.5,1.5]}), 
             show_toolbar=True,
             grid_options = dict(maxVisibleRows = 30,
@@ -82,8 +82,8 @@ class ExamData:
                                 filterable=False,
                                 autoEdit=True,
                                 enableColumnReorder=False )) 
-        self.grid_marks.on(events, self.marks_changed)
-        self.grid_marks.on(['selection_changed','row_removed'],self.select_last_row)
+        self.grid_grades.on(events, self.grades_changed)
+        self.grid_grades.on(['selection_changed','row_removed'],self.select_last_row)
         
 
         self.grid_score = qgrid.show_grid(
@@ -120,18 +120,25 @@ class ExamData:
         self.button_update = Button(description='Updating enabled', button_style='success', tooltip="Toggles the automatic recalculation when editing cells in the table. These auto updates might be annoying when trying to edit multiple data fields.")
         self.button_postfix = widgets.ToggleButton(
                 value=False,
-                description='Aggregate Postfix',
+                description='Drop Postfix',
                 disabled=False,
                 button_style='info', # 'success', 'info', 'warning', 'danger' or ''
-                tooltip="Wether or not the grade overview and plot will aggregate grades with different postfixes into one grade. E.g. the marks '2-','2','2+' will all be shown as '2'.",
+                tooltip="Wether or not the grade overview and plot will aggregate grades with different postfixes into one grade. E.g. the grades '2-','2','2+' will all be shown as '2'.",
                 icon='times' # (FontAwesome names without the `fa-` prefix)
             )
+        self.passed_perc = widgets.FloatText(
+                    value=40,
+                    description='Passed:',
+                    disabled=False
+                )
+
         self.button_export.on_click(self.export)
         self.button_undo.on_click(self.undo)
         self.button_redo.on_click(self.redo)
         self.button_update.on_click(self.switch_disable_update)
         self.button_postfix.observe(self.switch_aggregate_postfix)
-        self.button_bar = HBox([self.button_undo, self.button_redo, self.button_export, self.button_update,self.button_postfix])
+        self.passed_perc.observe(self.passed_percentage_changed)
+        self.button_bar = HBox([self.button_undo, self.button_redo, self.button_export, self.button_update,self.button_postfix, self.passed_perc, widgets.Label(value='%')])
 
         self.load(must_exist=False)
         
@@ -142,13 +149,13 @@ class ExamData:
     def _set_current_state(self):
         self._current_state = {
             'tasks': self.tasks_df,
-            'marks': self.marks_df,
+            'grades': self.grades_df,
             'students': self.students_df
         }
 
     def _restore_state(self, state):
         self.tasks_df = state['tasks'] 
-        self.marks_df = state['marks'] 
+        self.grades_df = state['grades'] 
         self.students_df = state['students'] 
         self.recalculate_totals()
 
@@ -192,6 +199,12 @@ class ExamData:
             self.button_postfix.icon = 'times'
         self.recalculate_output()
 
+    def passed_percentage_changed(self, *arg):
+        if not arg[0]['name'] == 'value':
+            return
+        self.recalculate_output()
+
+
     def _update_df(self, grid, new_df):
         grid.df = new_df
         return
@@ -218,13 +231,13 @@ class ExamData:
         self._update_df(self.grid_tasks, value)
 
     @property
-    def marks_df(self):
-        return self.grid_marks.get_changed_df()
+    def grades_df(self):
+        return self.grid_grades.get_changed_df()
 
-    @marks_df.setter
-    def marks_df(self, value):
+    @grades_df.setter
+    def grades_df(self, value):
         value = value.astype({'Grade': 'str', 'Min Percentage': 'float', 'Min Points': 'float', 'Max Points': 'float'})
-        self._update_df(self.grid_marks, value)
+        self._update_df(self.grid_grades, value)
 
     @property
     def students_df(self):
@@ -243,11 +256,13 @@ class ExamData:
                 path_backup.unlink()
             if path.exists():
                 path.rename(path_backup)            
-            
+
+            additional = pd.DataFrame(data=dict(postfix=[self.button_postfix.value], passed=[self.passed_perc.value]))            
             with pd.ExcelWriter(str(path)) as writer:
                 self.students_df.to_excel(writer, index=False, sheet_name='Students')
                 self.tasks_df.to_excel(writer, index=False, sheet_name='Tasks')
-                self.marks_df.to_excel(writer, index=False, sheet_name='Grades')
+                self.grades_df.to_excel(writer, index=False, sheet_name='Grades')
+                additional.to_excel(writer, index=False, sheet_name='Additional')
                 if export:
                     self.grid_points.df.to_excel(writer, index=True, sheet_name='Points')
                     self.grid_score.df.to_excel(writer, index=True, sheet_name='Score')
@@ -262,14 +277,17 @@ class ExamData:
             students_df = pd.read_excel(str(load_path), sheet_name='Students')
             tasks_df = pd.read_excel(str(load_path), sheet_name='Tasks')
             try:
-                marks_df = pd.read_excel(str(load_path), sheet_name='Grades')
+                grades_df = pd.read_excel(str(load_path), sheet_name='Grades')
+                additional = pd.read_excel(str(load_path), sheet_name='Additional')
+                self.button_postfix.value = bool(additional['postfix'][0])
+                self.passed_perc.value = additional['passed'][0]
             except XLRDError:
-                marks_df = pd.read_excel(str(load_path), sheet_name='Marks')
+                grades_df = pd.read_excel(str(load_path), sheet_name='Marks')
                 students_df = students_df.rename(columns={'Mark':'Grade'})
-                marks_df = marks_df.rename(columns={'Mark':'Grade'})
+                grades_df = grades_df.rename(columns={'Mark':'Grade'})
                 students_df.insert(2,'Adjustment',0)
             self.students_df = students_df
-            self.marks_df = marks_df
+            self.grades_df = grades_df
             self.tasks_df = tasks_df
             self.recalculate_totals()    
         except Exception as ex:
@@ -311,27 +329,27 @@ class ExamData:
         totals_perc = np.array([f'{round(p,1):.1f}' for p in totals_perc])
         students_df['Total'] = totals.astype(str)+" ("+totals_perc+'%)'
         self.students_df = students_df
-        self.recalculate_marks()
+        self.recalculate_grades()
 
-    def recalculate_marks(self):
+    def recalculate_grades(self):
         if self._disable_update:
             self._set_current_state()
             self.save()
             return
         students_df = self.students_df
         tasks_df = self.tasks_df
-        marks_df = self.marks_df
+        grades_df = self.grades_df
 
         # update min points (round to half points)
         total_points = np.sum(tasks_df['Points'])
-        mark_points = np.round(marks_df['Min Percentage'] / 100 * total_points * 2)/2
-        marks_df['Min Points'] = mark_points
-        marks_df['Max Points'] = np.array([total_points,] + list(mark_points - 0.5)[:-1])
+        grade_points = np.round(grades_df['Min Percentage'] / 100 * total_points * 2)/2
+        grades_df['Min Points'] = grade_points
+        grades_df['Max Points'] = np.array([total_points,] + list(grade_points - 0.5)[:-1])
 
-        # calculate student marks
+        # calculate student grades
         totals = students_df.loc[:,tasks_df['Task'].values].sum(axis=1)
         grade_list= [] 
-        for row in marks_df.sort_values('Min Points', ascending = True).rename(columns={'Min Points': 'Points'}).itertuples():
+        for row in grades_df.sort_values('Min Points', ascending = True).rename(columns={'Min Points': 'Points'}).itertuples():
             grade_list.append(row.Grade)
             mask_students = totals>=row.Points
             students_df.loc[mask_students,'Grade'] = row.Grade
@@ -349,9 +367,7 @@ class ExamData:
         students_df = students_df.apply(adjust_grade, axis=1)
 
         self.students_df = students_df
-        self.marks_df = marks_df
-        self._set_current_state()
-        self.save()
+        self.grades_df = grades_df
         self.recalculate_output()
 
     def _grade_to_float(self, grades):
@@ -377,11 +393,16 @@ class ExamData:
         return np.array(result)
 
     def recalculate_output(self):
+        self._set_current_state()
+        self.save()
+
+        # prepare students
         students_df = self.students_df.copy()
         students_df['Points'] = students_df.loc[:,self.tasks_df['Task'].values].sum(axis=1)
         students_df['Amount'] = 1
         students_df['Students'] = students_df['Student']
-
+      
+        # aggregate points / score dataframes
         def agg_names(seq):
             return ", ".join(seq.values)
 
@@ -395,53 +416,81 @@ class ExamData:
         self.grid_score.df = (score_base_df
                                 .groupby('Grade')
                                 .agg({'Amount': 'sum', 'Students': agg_names}))
+                                
+        with self.output_plot_score:
+            self.output_plot_score.clear_output(True)
+            self._plot_score()
 
-        # plot_points= self.grid_points.df.reset_index()[['Points','Amount']]
-        total_points = np.sum(self.tasks_df['Points'])
+        with self.output_info:
+            self.output_info.clear_output(True)
+            self._print_output()
+
+    def _print_output(self):
+        # prepare students 
+        total_points = np.sum(self.tasks_df['Points'])   
+        students_df = self.students_df.copy()
+        students_df['Points'] = students_df.loc[:,self.tasks_df['Task'].values].sum(axis=1)
+        students_df['Percentage'] = students_df['Points']*100 / total_points
+        passed = students_df[students_df['Percentage']>=self.passed_perc.value]
+        failed = students_df[students_df['Percentage']<self.passed_perc.value]
+
+        # print information
+        print('Information')
+        print('-----------\n')
+        df = self.grid_score.df
+        mean = np.sum(self._grade_to_float(df.index.values) * df['Amount'])/np.sum(df['Amount'])
+        print(f'Ø {mean}')
+        print(f'average percentage: {np.mean(students_df["Percentage"]):.1f}%')
+        print(f'median percentage: {np.median(students_df["Percentage"]):.1f}%')
+        print(f'#students: {len(self.students_df)}')
+        print(f'#passed: {len(passed)} ({len(passed)*100/len(self.students_df):.1f}%), #failed: {len(failed)} ({len(failed)*100/len(self.students_df):.1f}%)')
+        print(f'passing percentage: {self.passed_perc.value}%')
+        if not self.passed_perc.value in self.grades_df['Min Percentage'].values:
+            print(f'WARNING: passing percentage does not coincide with a grade!')
+
+    def _plot_score(self):
+        # prepare students table with additional precalculated information        
+        total_points = np.sum(self.tasks_df['Points'])      
+        students_df = self.students_df.copy()
+        students_df['Points'] = students_df.loc[:,self.tasks_df['Task'].values].sum(axis=1)
+        students_df.loc[students_df['Points'] > total_points,'Points'] = total_points
+        students_df['Amount'] = 1
+        students_df['Students'] = students_df['Student']
+      
+        # create plotting dataframe for points        
         points = np.arange(0, total_points+0.1,step=0.5)
         plot_points = pd.DataFrame(index=points, data=dict(Amount=0))
-        truncated_points = students_df.copy()
-        truncated_points.loc[truncated_points['Points'] > total_points,'Points'] = total_points
-        truncated_points = (truncated_points
-                                .groupby('Points')
-                                .agg({'Grade': 'first', 'Amount': 'sum', 'Students': agg_names}))
-        plot_points['Amount'] = truncated_points['Amount']
+        agg_points = (students_df
+                        .groupby('Points')
+                        .agg({'Grade': 'first', 'Amount': 'sum'}))
+        plot_points['Amount'] = agg_points['Amount']
 
-        grade_list = self.marks_df['Grade'].values
+        # create plotting dataframe for score
+        grade_list = self.grades_df['Grade'].values
         if self.button_postfix.value:
             grade_list = np.unique(self._strip_postfix(grade_list))
         plot_score = pd.DataFrame(index=grade_list, data=dict(Amount=0))
         plot_score['Amount'] = self.grid_score.df['Amount']
+
+        # plot
+        fig = plt.figure(figsize=(17, 5)) 
+        gs = gridspec.GridSpec(1, 2, width_ratios=[3, 4]) 
+        ax1 = plt.subplot(gs[0])
+        ax2 = plt.subplot(gs[1])
+        plot_score.plot.bar(y='Amount', color='#28d9ed', ax=ax1)
+        plot_points.plot.bar(y='Amount', color='#28d9ed', ax=ax2)
+        xticks_pos = (self.grades_df['Min Points'].values + self.grades_df['Max Points'].values)
+        xticks_labels = self.grades_df['Grade'].values
+        plt.xticks(list(xticks_pos),list(xticks_labels))
+        grades_no_postfix = self.grades_df.copy()
+        grades_no_postfix['Grade'] = self._strip_postfix(grades_no_postfix['Grade'])
+        xlines_large = grades_no_postfix.groupby('Grade').agg({'Min Points': 'min'})['Min Points'].values[:-1]
+        xlines = self.grades_df['Min Points'].values[:-1]
+        xlines = np.array([xl for xl in xlines if xl not in xlines_large])
+        plt.vlines((xlines-0.25)*2, 0, np.max(plot_points['Amount']*0.45), linestyles='dotted')
+        plt.vlines((xlines_large-0.25)*2, 0, np.max(plot_points['Amount']*0.8), linestyles='dotted')
+        plt.show()
         
-        with self.output_plot_score:
-            self.output_plot_score.clear_output(True)
-            fig = plt.figure(figsize=(17, 5)) 
-            gs = gridspec.GridSpec(1, 2, width_ratios=[3, 4]) 
-            ax1 = plt.subplot(gs[0])
-            ax2 = plt.subplot(gs[1])
-            plot_score.plot.bar(y='Amount', color='#28d9ed', ax=ax1)
-            plot_points.plot.bar(y='Amount', color='#28d9ed', ax=ax2)
-            xticks_pos = (self.marks_df['Min Points'].values + self.marks_df['Max Points'].values)
-            xticks_labels = self.marks_df['Grade'].values
-            plt.xticks(list(xticks_pos),list(xticks_labels))
-            marks_no_postfix = self.marks_df.copy()
-            marks_no_postfix['Grade'] = self._strip_postfix(marks_no_postfix['Grade'])
-            xlines_large = marks_no_postfix.groupby('Grade').agg({'Min Points': 'min'})['Min Points'].values[:-1]
-            xlines = self.marks_df['Min Points'].values[:-1]
-            xlines = np.array([xl for xl in xlines if xl not in xlines_large])
-            plt.vlines((xlines-0.25)*2, 0, np.max(plot_points['Amount']*0.45), linestyles='dotted')
-            plt.vlines((xlines_large-0.25)*2, 0, np.max(plot_points['Amount']*0.8), linestyles='dotted')
-            plt.show()
-
-        with self.output_info:
-            self.output_info.clear_output(True)
-            print('Information')
-            print('-----------\n')
-            df = self.grid_score.df
-            mean = np.sum(self._grade_to_float(df.index.values) * df['Amount'])/np.sum(df['Amount'])
-            print(f'Ø {mean}')
-            print(f'#students: {len(self.students_df)}')
-
     def tasks_changed(self, *arg, **kwarg):
         evt = arg[0]
         if self.ignore_cell_edited and evt['name'] == 'cell_edited':
@@ -461,11 +510,11 @@ class ExamData:
         self.recalculate_totals()
 
 
-    def marks_changed(self, *arg, **kwarg):
+    def grades_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]['name'] == 'cell_edited':
             return
         self._add_to_history()
-        self.recalculate_marks()
+        self.recalculate_grades()
 
     def students_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]['name'] == 'cell_edited':
@@ -496,8 +545,8 @@ class ExamData:
     def show_tasks(self):
         display(self.grid_tasks)
 
-    def show_marks(self):        
-        display(self.grid_marks)
+    def show_grades(self):        
+        display(self.grid_grades)
 
     def init(self):
         display(HTML("""
@@ -521,7 +570,7 @@ class ExamData:
         self.show_buttons()
         self.show_students()
         self.show_tasks()
-        self.show_marks()
+        self.show_grades()
         
     def show_all(self):
         self.init()
@@ -534,6 +583,14 @@ class ExamData:
         display(self.grid_score)
         display(self.grid_points)
         
-        
+    def show_printable(self):
+        with pd.option_context("display.max_rows", None, "display.max_columns", None):
+            display(self.students_df.set_index('Student'))
+            display(self.tasks_df.set_index('Task'))
+            display(self.grades_df.set_index('Grade'))
+            self._print_output()
+            self._plot_score()
+            display(self.grid_score.df)
+            display(self.grid_points.df)
 
 import re
