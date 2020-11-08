@@ -13,8 +13,9 @@ from matplotlib import gridspec
 from matplotlib import pyplot as plt
 from xlrd import XLRDError
 
-# TODO: enable 'clear_output'
-# fix entering floating point number
+# fix save / load / autosave button
+# save load not working in all cases
+# cannot disable autosave if autoupdate is disabled
 
 
 class ExamData:
@@ -381,6 +382,7 @@ class ExamData:
             self.set_errmsg(str(ex) + "\n")
             return False
 
+        self.reset_msg()
         return True
 
     def set_stdmsg(self, msg):

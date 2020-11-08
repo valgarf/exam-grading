@@ -7,3 +7,4 @@ jupyter nbextension install --py qgrid --user
 jupyter nbextension enable --py --user qgrid
 jupyter nbextension install --py ipysheet --user
 jupyter nbextension enable --py --user ipysheet
+jupyter nbextension enable init_cell/main
