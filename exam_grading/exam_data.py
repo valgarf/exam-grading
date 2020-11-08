@@ -324,7 +324,7 @@ class ExamData:
             finally:
                 self._disable_autosave - old_autosave
         if self.path is None:
-            self.output_text.append_stdout("Please select a file")
+            self.set_stdmsg("Please select a file")
             return False
         try:
             path_backup = self.path.with_name(self.path.name[:-5] + "-backup.xlsx")
@@ -345,18 +345,18 @@ class ExamData:
                 self.grid_points.df.to_excel(writer, index=True, sheet_name="Points")
                 self.grid_score.df.to_excel(writer, index=True, sheet_name="Score")
         except Exception as ex:
-            self.output_text.append_stderr(str(ex) + "\n")
+            self.set_errmsg(str(ex) + "\n")
             return False
 
-        # self.output_text.clear_output()
+        self.reset_msg()
         return True
 
     def load(self):
         if self.path is None:
-            self.output_text.append_stdout("Please select a file")
+            self.set_stdmsg("Please select a file")
             return False
         if not self.path.is_file():
-            self.output_text.append_stderr(f"Cannot find file at {self.path!s}")
+            self.set_errmsg(f"Cannot find file at {self.path!s}")
             return False
         try:
             students_df = pd.read_excel(str(self.path), sheet_name="Students")
@@ -378,11 +378,21 @@ class ExamData:
             self.tasks_df = tasks_df
             self.recalculate_totals()
         except Exception as ex:
-            self.output_text.append_stderr(str(ex) + "\n")
-            raise
+            self.set_errmsg(str(ex) + "\n")
+            return False
 
-        # self.output_text.clear_output()
         return True
+
+    def set_stdmsg(self, msg):
+        self.output_text.clear_output()
+        self.output_text.append_stdout(msg)
+
+    def set_errmsg(self, msg):
+        self.output_text.clear_output()
+        self.output_text.append_stderr(msg)
+
+    def reset_msg(self):
+        self.output_text.clear_output()
 
     def new_taskname(self, old, new_index):
         students_df = self.students_df

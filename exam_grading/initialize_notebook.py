@@ -1,4 +1,4 @@
 from . import exam_data
 
-ed = exam_data.ExamData()
-ed.show_all()
+data = exam_data.ExamData()
+data.show_all()
