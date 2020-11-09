@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name="exam-grading",
-    version="0.1",
+    version="0.2",
     description="python / jupyter tools for visualizing exam grades",
     author="Stefan Schulz",
     author_email="stefan.schulz.2507@gmail.com",

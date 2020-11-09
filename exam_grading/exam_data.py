@@ -1,4 +1,5 @@
 import re
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 
@@ -18,17 +19,31 @@ from xlrd import XLRDError
 # cannot disable autosave if autoupdate is disabled
 
 
+def print_event_output(func):
+    @wraps(func)
+    def wrapped(self, *arg, **kwarg):
+        self.reset_msg()
+        try:
+            if self.debug:
+                self.print_event(func.__name__, *arg, **kwarg)
+
+            return func(self, *arg, **kwarg)
+        except BaseException as exc:
+            self.show_errmsg(str(exc))
+
+    return wrapped
+
+
 class ExamData:
-    def __init__(self, grade_postfixes={"+": -0.3, "-": 0.3}):
-        self.file_chooser = FileChooser()
+    def __init__(self, grade_postfixes={"+": -0.3, "-": 0.3}, debug=False):
+        self.file_chooser = FileChooser(str(Path("~").expanduser().resolve()), "")
         self.path = None
         self.ignore_cell_edited = False
         self.grade_postfixes = grade_postfixes
-        self._disable_update = False
-        self._disable_autosave = False
         self._undo = []
         self._redo = []
         self._students_fixed_cols = 4
+        self.debug = debug
 
         events = [
             "cell_edited",
@@ -147,12 +162,14 @@ class ExamData:
         self.button_redo = Button(description="Redo")
         self.button_save = Button(description="Save")
         self.button_load = Button(description="Load")
-        self.button_autosave = Button(
+        self.button_autosave = widgets.ToggleButton(
+            value=True,
             description="Autosave enabled",
             button_style="success",
             tooltip="Toggles the automatic save feature upon changes.",
         )
-        self.button_update = Button(
+        self.button_update = widgets.ToggleButton(
+            value=True,
             description="Updating enabled",
             button_style="success",
             tooltip="Toggles the automatic recalculation when editing cells in the table. These auto updates might be annoying when trying to edit multiple data fields.",
@@ -167,12 +184,12 @@ class ExamData:
         )
         self.passed_perc = widgets.FloatText(value=40, description="Passed:", disabled=False)
 
-        self.button_save.on_click(self.save)
-        self.button_load.on_click(self.load)
-        self.button_undo.on_click(self.undo)
-        self.button_redo.on_click(self.redo)
-        self.button_autosave.on_click(self.switch_disable_autosave)
-        self.button_update.on_click(self.switch_disable_update)
+        self.button_save.on_click(self.click_save)
+        self.button_load.on_click(self.click_load)
+        self.button_undo.on_click(self.click_undo)
+        self.button_redo.on_click(self.click_redo)
+        self.button_autosave.observe(self.switch_autosave)
+        self.button_update.observe(self.switch_disable_update)
         self.button_postfix.observe(self.switch_aggregate_postfix)
         self.passed_perc.observe(self.passed_percentage_changed)
         self.button_bar_files = HBox([self.button_save, self.button_load, self.button_autosave,])
@@ -187,7 +204,9 @@ class ExamData:
             ]
         )
 
-        result = self.load()
+        result = None
+        if self.path is not None:
+            result = self.load()
         if not result:
             self.recalculate_totals()
 
@@ -203,13 +222,16 @@ class ExamData:
         self.grades_df = state["grades"]
         self.students_df = state["students"]
         self.recalculate_totals()
+        if self.button_autosave.value:
+            self.save()
 
     def _add_to_history(self):
         self._undo.append(self._current_state)
         self._redo = []
         self._set_current_state()
 
-    def undo(self, *arg):
+    @print_event_output
+    def click_undo(self, *arg):
         if not self._undo:
             return
         self._set_current_state()
@@ -217,7 +239,8 @@ class ExamData:
         self._restore_state(self._undo.pop())
         self._set_current_state()
 
-    def redo(self, *arg):
+    @print_event_output
+    def click_redo(self, *arg):
         if not self._redo:
             return
         self._set_current_state()
@@ -225,26 +248,33 @@ class ExamData:
         self._restore_state(self._redo.pop())
         self._set_current_state()
 
-    def switch_disable_autosave(self, *arg):
-        self._disable_autosave = not self._disable_autosave
-        if self._disable_autosave:
-            self.button_autosave.button_style = "warning"
-            self.button_autosave.description = "Autosave disabled"
-        else:
+    @print_event_output
+    def switch_autosave(self, *arg):
+        if not arg[0]["name"] == "value":
+            return
+        if self.button_autosave.value:
             self.button_autosave.button_style = "success"
             self.button_autosave.description = "Autosave enabled"
             self.save()
-
-    def switch_disable_update(self, *arg):
-        self._disable_update = not self._disable_update
-        if self._disable_update:
-            self.button_update.button_style = "warning"
-            self.button_update.description = "Updating disabled"
         else:
+            self.button_autosave.button_style = "warning"
+            self.button_autosave.description = "Autosave disabled"
+
+    @print_event_output
+    def switch_disable_update(self, *arg):
+        if not arg[0]["name"] == "value":
+            return
+        if self.button_update.value:
             self.button_update.button_style = "success"
             self.button_update.description = "Updating enabled"
             self.recalculate_totals()
+            if self.button_autosave.value:
+                self.save()
+        else:
+            self.button_update.button_style = "warning"
+            self.button_update.description = "Updating disabled"
 
+    @print_event_output
     def switch_aggregate_postfix(self, *arg):
         if not arg[0]["name"] == "value":
             return
@@ -253,11 +283,16 @@ class ExamData:
         else:
             self.button_postfix.icon = "times"
         self.recalculate_output()
+        if self.button_autosave.value:
+            self.save()
 
+    @print_event_output
     def passed_percentage_changed(self, *arg):
         if not arg[0]["name"] == "value":
             return
         self.recalculate_output()
+        if self.button_autosave.value:
+            self.save()
 
     def _update_df(self, grid, new_df):
         grid.df = new_df
@@ -308,24 +343,32 @@ class ExamData:
     def students_df(self, value):
         self._update_df(self.grid_students, value)
 
+    @print_event_output
     def selected_file_changed(self, *_):
         self.path = Path(self.file_chooser.selected)
         if self.path.is_file():
             self.load()
         else:
-            if not self._disable_autosave:
+            if self.button_autosave.value:
                 self.save()
 
+    @print_event_output
+    def click_load(self, *arg, **kwarg):
+        self.load()
+
+    @print_event_output
+    def click_save(self, *arg, **kwarg):
+        if not self.button_update.value:
+            if self.debug:
+                self.show_stdmsg("Recalculating before save")
+            self.recalculate_totals()
+        self.save()
+
     def save(self):
-        if self._disable_update:
-            old_autosave = self._disable_autosave
-            self._disable_autosave = True
-            try:
-                self.recalculate_totals()
-            finally:
-                self._disable_autosave - old_autosave
+        if self.debug:
+            self.show_stdmsg("Saving...")
         if self.path is None:
-            self.set_stdmsg("Please select a file")
+            self.show_stdmsg("Please select a file")
             return False
         try:
             path_backup = self.path.with_name(self.path.name[:-5] + "-backup.xlsx")
@@ -345,19 +388,23 @@ class ExamData:
                 additional.to_excel(writer, index=False, sheet_name="Additional")
                 self.grid_points.df.to_excel(writer, index=True, sheet_name="Points")
                 self.grid_score.df.to_excel(writer, index=True, sheet_name="Score")
-        except Exception as ex:
-            self.set_errmsg(str(ex) + "\n")
+        except BaseException as ex:
+            self.show_errmsg(str(ex) + "\n")
             return False
 
         self.reset_msg()
+        if self.debug:
+            self.show_stdmsg("Saving Successfull")
         return True
 
     def load(self):
+        if self.debug:
+            self.show_stdmsg("Loading...")
         if self.path is None:
-            self.set_stdmsg("Please select a file")
+            self.show_stdmsg("Please select a file")
             return False
         if not self.path.is_file():
-            self.set_errmsg(f"Cannot find file at {self.path!s}")
+            self.show_errmsg(f"Cannot find file at {self.path!s}")
             return False
         try:
             students_df = pd.read_excel(str(self.path), sheet_name="Students")
@@ -378,23 +425,24 @@ class ExamData:
             self.grades_df = grades_df
             self.tasks_df = tasks_df
             self.recalculate_totals()
-        except Exception as ex:
-            self.set_errmsg(str(ex) + "\n")
+        except BaseException as ex:
+            self.show_errmsg(str(ex) + "\n")
             return False
 
         self.reset_msg()
+        if self.debug:
+            self.show_stdmsg("Loading Successfull")
         return True
 
-    def set_stdmsg(self, msg):
-        self.output_text.clear_output()
-        self.output_text.append_stdout(msg)
+    def show_stdmsg(self, msg):
+        self.output_text.append_stdout(msg + "\n")
 
-    def set_errmsg(self, msg):
-        self.output_text.clear_output()
-        self.output_text.append_stderr(msg)
+    def show_errmsg(self, msg):
+        self.output_text.append_stderr(msg + "\n")
 
     def reset_msg(self):
-        self.output_text.clear_output()
+        if not self.debug:
+            self.output_text.clear_output()
 
     def new_taskname(self, old, new_index):
         students_df = self.students_df
@@ -418,11 +466,6 @@ class ExamData:
             self.grid_tasks.df = tasks_df
 
     def recalculate_totals(self):
-        if self._disable_update:
-            self._set_current_state()
-            if not self._disable_autosave:
-                self.save()
-            return
         students_df = self.students_df
         tasks_df = self.tasks_df
         total_points = np.sum(tasks_df["Points"])
@@ -434,11 +477,6 @@ class ExamData:
         self.recalculate_grades()
 
     def recalculate_grades(self):
-        if self._disable_update:
-            self._set_current_state()
-            if not self._disable_autosave:
-                self.save()
-            return
         students_df = self.students_df
         tasks_df = self.tasks_df
         grades_df = self.grades_df
@@ -532,9 +570,6 @@ class ExamData:
             self.output_info.clear_output(True)
             self._print_output()
 
-        if not self._disable_autosave:
-            self.save()
-
     def _print_output(self):
         # prepare students
         total_points = np.sum(self.tasks_df["Points"])
@@ -607,6 +642,7 @@ class ExamData:
         )
         plt.show()
 
+    @print_event_output
     def tasks_changed(self, *arg, **kwarg):
         evt = arg[0]
         if self.ignore_cell_edited and evt["name"] == "cell_edited":
@@ -623,29 +659,41 @@ class ExamData:
             students_df.drop(indices, axis=1, inplace=True)
             self.students_df = students_df
             self.tasks_df = self.tasks_df.reset_index(drop=True)
-        # self.recalculate_totals()
+        if self.button_update.value:
+            self.recalculate_totals()
+        if self.button_autosave.value:
+            self.save()
 
+    @print_event_output
     def grades_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]["name"] == "cell_edited":
             return
         self._add_to_history()
-        self.recalculate_grades()
+        if self.button_update.value:
+            self.recalculate_grades()
+        if self.button_autosave.value:
+            self.save()
 
+    @print_event_output
     def students_changed(self, *arg, **kwarg):
         if self.ignore_cell_edited and arg[0]["name"] == "cell_edited":
             return
         self._add_to_history()
-        self.recalculate_totals()
+        if self.button_update.value:
+            self.recalculate_totals()
+        if self.button_autosave.value:
+            self.save()
 
+    @print_event_output
     def select_last_row(self, evt, grid):
         if not evt["name"] == "selection_changed" or (not evt["new"] and evt["source"] == "gui"):
             df = grid.get_changed_df()
             grid.change_selection(rows=[len(df) - 1])
 
-    def print_event(self, *arg, **kwarg):
+    def print_event(self, name, *arg, **kwarg):
         with self.output_text:
             evt = arg[0]
-            print(f"evt: {evt}")
+            print(f"func: {name} evt: {evt}")
             if len(arg) > 2:
                 print(f"arg: {arg[2:]}")
             if kwarg:
